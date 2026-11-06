@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Орбита — прототип</title>
+<style>
+:root{--bg:#0b0d14;--fg:#e9ecf2;--dim:#7c8496;--panel:#151925;--red:#ff5a5f}
+html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:-apple-system,system-ui,"Segoe UI",Roboto,sans-serif;overflow:hidden;touch-action:none;user-select:none;-webkit-user-select:none}
+canvas{display:block}
+#top{position:fixed;top:10px;left:16px;right:16px;display:flex;justify-content:space-between;align-items:flex-start;pointer-events:none;font-size:14px;gap:8px}
+#stats b{font-size:20px;font-weight:600}
+#wk{width:120px;height:3px;background:#262b3a;border-radius:2px;margin-top:6px;overflow:hidden}
+#wk i{display:block;height:100%;background:var(--fg);width:0}
+#top .r{pointer-events:auto;display:flex;gap:6px}
+button{font:inherit;color:var(--fg);background:var(--panel);border:1px solid #2a3042;border-radius:10px;padding:6px 10px;cursor:pointer}
+button:hover{border-color:#4a5370}
+#bar{position:fixed;bottom:10px;left:0;right:0;display:flex;justify-content:center;gap:6px;flex-wrap:wrap;padding:0 16px;font-size:13px}
+.chip{display:flex;align-items:center;gap:6px;background:var(--panel);border:1px solid #232838;border-radius:20px;padding:4px 6px 4px 10px}
+.chip button{padding:2px 8px;border-radius:12px;font-size:13px}
+.dot{width:14px;height:14px;border-radius:50%}
+.res{color:var(--dim);padding:4px 10px}
+#hint{position:fixed;top:64px;left:16px;right:16px;text-align:center;color:#c9cfdc;font-size:15px;pointer-events:none;transition:opacity .5s;text-shadow:0 1px 6px #000}
+#modal{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(5,6,10,.72);padding:16px}
+.card{background:#141824;border:1px solid #262c3d;border-radius:16px;padding:22px;max-width:440px;text-align:center}
+.card h2{margin:0 0 6px;font-size:20px;font-weight:600}
+.card p{margin:0;color:var(--dim);font-size:14px;line-height:1.45}
+.opts{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap;justify-content:center}
+.opt{width:170px;padding:14px;text-align:left;border-radius:12px}
+.opt b{display:block;font-size:15px;margin-bottom:4px}
+.opt span{color:var(--dim);font-size:13px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="top">
+  <div id="stats"><b id="score">0</b> доставлено · неделя <span id="week">1</span><div id="wk"><i></i></div></div>
+  <div class="r"><button id="bPause">❚❚</button><button id="bSpeed">1×</button></div>
+</div>
+<div id="hint"></div>
+<div id="bar"></div>
+<div id="modal"><div class="card" id="card"></div></div>
+<script>
+'use strict';
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const TAU=Math.PI*2;
+const LINE_COLORS=['#ff5a5f','#ffc145','#3ec7ff','#7cdf6a','#c37dff','#ff8fd0'];
+const SHAPES=['circle','triangle','square','diamond','star'];
+const SPEED=95, OP=0.14, BOOST=0.9, SUN_R=34, CORONA=80, WEEK=40, CAP=8, HUB_CAP=18, OVER_TIME=20;
+let W,H,DPR,S;
+function resize(){DPR=Math.min(2,devicePixelRatio||1);W=innerWidth;H=innerHeight;cv.width=W*DPR;cv.height=H*DPR;cv.style.width=W+'px';cv.style.height=H+'px';S=Math.max(.1,Math.min(W,H-120)/1060);}
+addEventListener('resize',resize);resize();
+const sx=x=>W/2+x*S, sy=y=>H/2+y*S;
+
+const stars=Array.from({length:160},()=>({x:Math.random(),y:Math.random(),a:Math.random()*.5+.1,r:Math.random()<.1?1.4:.8}));
+
+// ---------- state ----------
+let time,bodies,lines,ships,res,score,week,weekT,spawnT,gameOver,paused,speed,floats,flares,placing,drag,dist,nextId,hintStep,hintT,modalOpen;
+function reset(){
+  time=0;bodies=[];lines=[];ships=[];floats=[];flares=[];nextId=1;
+  res={lines:3,ships:3,cap:6};score=0;week=1;weekT=0;spawnT=2;gameOver=false;paused=false;speed=1;placing=false;drag=null;modalOpen=false;
+  addBody({kind:'planet',shape:'circle',R:120,T:34,a0:0.3});
+  addBody({kind:'planet',shape:'triangle',R:205,T:62,a0:2.6});
+  addBody({kind:'planet',shape:'square',R:285,T:96,a0:4.6});
+  addBody({kind:'giant',R:370,T:150,a0:1.2});
+  // стартовые грузы
+  bodies[0].queue.push({shape:'triangle'});bodies[1].queue.push({shape:'square'});
+  recompute();hintStep=0;hintT=0;setHint('Тяни от планеты к планете — проложишь маршрут. Груз-фигура летит на планету с такой же фигурой.');
+  updateHud(true);hideModal();
+}
+function addBody(o){const b=Object.assign({id:nextId++,queue:[],over:0,pulse:0,x:0,y:0,born:time||0},o);
+  b.r=b.kind==='giant'?24:b.kind==='hub'?8:12;bodies.push(b);place(b);return b;}
+function angOf(b){return b.kind==='hub'?angOf(b.parent)+b.off:b.a0+TAU*time/b.T;}
+function place(b){const R=b.kind==='hub'?b.parent.R:b.R,a=angOf(b);b.x=Math.cos(a)*R;b.y=Math.sin(a)*R;b.sx=sx(b.x);b.sy=sy(b.y);}
+const capOf=b=>b.kind==='hub'?HUB_CAP:CAP;
+
+// ---------- маршрутизация: число поездок до тела нужной фигуры ----------
+function recompute(){
+  const nodes=bodies.filter(b=>b.kind!=='giant');
+  const adj=new Map(nodes.map(b=>[b.id,new Set()]));
+  for(const L of lines){const ss=L.stops.filter(b=>b.kind!=='giant');for(const a of ss)for(const c of ss)if(a!==c)adj.get(a.id).add(c.id);}
+  dist={};
+  for(const sh of SHAPES){const d={};let q=[];for(const b of nodes)if(b.shape===sh){d[b.id]=0;q.push(b.id);}
+    while(q.length){const nq=[];for(const id of q)for(const n of adj.get(id))if(d[n]===undefined){d[n]=d[id]+1;nq.push(n);}q=nq;}
+    dist[sh]=d;}
+}
+const D=(sh,b)=>{const v=dist[sh][b.id];return v===undefined?Infinity:v;};
+
+// ---------- корабли ----------
+function newShip(L){const b=L.stops[0];const s={line:L,i:0,dir:1,x:b.x,y:b.y,state:'dock',t:.3,cargo:[],boost:0,ang:0,trail:[]};ships.push(s);return s;}
+function fixDir(s){const n=s.line.stops.length;if(s.line.loop)return;if(s.i>=n-1)s.dir=-1;else if(s.i<=0)s.dir=1;}
+function nextIdx(s){const n=s.line.stops.length;return s.line.loop?((s.i+s.dir)%n+n)%n:s.i+s.dir;}
+function ahead(s){const L=s.line,n=L.stops.length,out=[];
+  if(L.loop){for(let k=1;k<n;k++)out.push(L.stops[((s.i+s.dir*k)%n+n)%n]);}
+  else for(let j=s.i+s.dir;j>=0&&j<n;j+=s.dir)out.push(L.stops[j]);
+  return out.filter(b=>b.kind!=='giant');}
+function hopFor(s,b,c){let best=null,bd=D(c.shape,b);for(const st of ahead(s)){const d=D(c.shape,st);if(d<bd){bd=d;best=st;}}return best;}
+function updateShip(s,dt){
+  const st=s.line.stops;
+  if(s.state==='dock'){
+    const b=st[s.i];s.x=b.x;s.y=b.y;s.t-=dt;if(s.t>0)return;
+    const ui=s.cargo.findIndex(c=>c.hop===b||!st.includes(c.hop));
+    if(ui>=0){const c=s.cargo.splice(ui,1)[0];if(c.shape===b.shape)deliver(b);else{c.hop=null;b.queue.push(c);}s.t=OP;return;}
+    fixDir(s);
+    if(s.cargo.length<res.cap)for(let k=0;k<b.queue.length;k++){const c=b.queue[k],h=hopFor(s,b,c);
+      if(h){c.hop=h;s.cargo.push(c);b.queue.splice(k,1);s.t=OP;return;}}
+    s.state='fly';s.i=nextIdx(s);return;
+  }
+  const tg=st[s.i];const dx=tg.x-s.x,dy=tg.y-s.y,d=Math.hypot(dx,dy);
+  let sp=SPEED*(1+s.boost);const inCorona=Math.hypot(s.x,s.y)<CORONA;if(inCorona)sp*=.35;
+  const step=sp*dt;
+  if(s.boost>0){s.trail.push(s.x,s.y);if(s.trail.length>40)s.trail.splice(0,2);}else if(s.trail.length)s.trail.splice(0,2);
+  if(d<=step+1){s.x=tg.x;s.y=tg.y;
+    if(tg.kind==='giant'){s.boost=BOOST;flares.push({b:tg,t:0,c:s.line.color});tone(196,.25,'sawtooth',.05);fixDir(s);s.i=nextIdx(s);
+      if(hintStep===2){hintStep=3;setHint('Праща! После пролёта у гиганта корабль летит почти вдвое быстрее до следующей остановки.');}}
+    else{s.state='dock';s.t=.35;s.boost=0;}
+  }else{s.x+=dx/d*step;s.y+=dy/d*step;s.ang=Math.atan2(dy,dx);
+    if(inCorona&&hintStep>=1&&!seenCorona){seenCorona=true;setHint('Пунктир — путь через корону Солнца: там корабли ползут. Подожди, пока планеты разойдутся, или веди линию в обход.');}}
+}
+let seenCorona=false;
+function deliver(b){score++;b.pulse=1;floats.push({x:b.x,y:b.y,t:0});
+  tone([523,587,659,784,880][score%5],.18,'sine',.06);
+  if(score===1&&hintStep===1){hintStep=2;setHint('Газовый гигант с кольцом — праща. Проведи маршрут через него: крюк, зато быстрее.');}}
+
+// ---------- спрос ----------
+function spawn(){const prods=bodies.filter(b=>b.kind==='planet');const shapes=[...new Set(prods.map(b=>b.shape))];
+  const b=prods[Math.random()*prods.length|0];const o=shapes.filter(x=>x!==b.shape);b.queue.push({shape:o[Math.random()*o.length|0],hop:null});}
+function freeOrbit(){for(let k=0;k<40;k++){const R=150+Math.random()*350;if(bodies.every(b=>b.kind==='hub'||Math.abs(b.R-R)>30))return R;}return 150+Math.random()*350;}
+function unlock(){
+  if(week===2)addBody({kind:'planet',shape:'diamond',R:450,T:210,a0:Math.random()*TAU});
+  else if(week===4)addBody({kind:'planet',shape:'star',R:505,T:260,a0:Math.random()*TAU});
+  else if(week>=3){const sh=[...new Set(bodies.filter(b=>b.kind==='planet').map(b=>b.shape))];const R=freeOrbit();
+    addBody({kind:'planet',shape:sh[Math.random()*sh.length|0],R,T:30*Math.pow(R/120,1.5),a0:Math.random()*TAU});}
+  recompute();
+}
+
+// ---------- линии ----------
+function freeLines(){return res.lines-lines.length;}
+function freeShips(){return res.ships-ships.length;}
+function createLine(stops,loop){const used=lines.map(l=>l.color);const color=LINE_COLORS.find(c=>!used.includes(c));
+  const L={color,stops,loop};lines.push(L);if(freeShips()>0)newShip(L);recompute();updateHud(true);
+  if(hintStep===0){hintStep=1;setHint('Корабль сам заберёт груз. Чужие фигуры пересаживаются между линиями на общих планетах.');}}
+function dumpShip(s){const nodes=bodies.filter(b=>b.kind!=='giant');let best=nodes[0],bd=1e9;
+  for(const b of nodes){const d=Math.hypot(b.x-s.x,b.y-s.y);if(d<bd){bd=d;best=b;}}
+  for(const c of s.cargo){if(c.shape===best.shape)deliver(best);else{c.hop=null;best.queue.push(c);}}s.cargo=[];}
+function deleteLine(L){for(const s of ships.filter(s=>s.line===L))dumpShip(s);ships=ships.filter(s=>s.line!==L);lines=lines.filter(l=>l!==L);recompute();updateHud(true);}
+function addShip(L){if(freeShips()>0){const s=newShip(L);s.i=Math.random()*L.stops.length|0;const b=L.stops[s.i];s.x=b.x;s.y=b.y;updateHud(true);}}
+function removeShip(L){const ls=ships.filter(s=>s.line===L);if(ls.length<=1)return;const s=ls[ls.length-1];dumpShip(s);ships.splice(ships.indexOf(s),1);updateHud(true);}
+function segBlocked(a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy||1;let t=-(a.x*dx+a.y*dy)/l2;t=Math.max(0,Math.min(1,t));return Math.hypot(a.x+dx*t,a.y+dy*t)<CORONA;}
+
+// ---------- ввод ----------
+function bodyAt(px,py){let best=null,bd=24;for(const b of bodies){const d=Math.hypot(b.sx-px,b.sy-py)-b.r;if(d<bd){bd=d;best=b;}}return best;}
+function handles(){const out=[];for(const L of lines){if(L.loop)continue;const n=L.stops.length;
+  for(const end of ['head','tail']){const e=end==='head'?L.stops[0]:L.stops[n-1],p=end==='head'?L.stops[1]:L.stops[n-2];
+    let dx=e.sx-p.sx,dy=e.sy-p.sy,d=Math.hypot(dx,dy)||1;out.push({L,end,body:e,x:e.sx+dx/d*(e.r+20),y:e.sy+dy/d*(e.r+20),nx:dx/d,ny:dy/d});}}return out;}
+function lagrangePoints(){const out=[];for(const p of bodies)if(p.kind==='planet'||p.kind==='giant')for(const off of [TAU/6,-TAU/6]){
+  if(bodies.some(h=>h.kind==='hub'&&h.parent===p&&h.off===off))continue;const a=angOf(p)+off;
+  out.push({p,off,x:sx(Math.cos(a)*p.R),y:sy(Math.sin(a)*p.R)});}return out;}
+let audio=null;
+cv.addEventListener('pointerdown',e=>{
+  if(!audio){try{audio=new (window.AudioContext||window.webkitAudioContext)();}catch(_){audio=false;}}
+  if(gameOver||modalOpen)return;
+  const px=e.clientX,py=e.clientY;
+  if(placing){const lp=lagrangePoints();let best=null,bd=30;for(const q of lp){const d=Math.hypot(q.x-px,q.y-py);if(d<bd){bd=d;best=q;}}
+    if(best){addBody({kind:'hub',parent:best.p,off:best.off});placing=false;recompute();setHint('Станция Лагранжа едет вместе с планетой. Проведи через неё линии — это пересадка с большим складом.');tone(330,.3,'triangle',.06);}
+    return;}
+  for(const h of handles())if(Math.hypot(h.x-px,h.y-py)<16){drag={mode:'extend',L:h.L,end:h.end,stops:[h.body],px,py,loop:false};cv.setPointerCapture(e.pointerId);return;}
+  const b=bodyAt(px,py);if(b){drag={mode:'new',stops:[b],px,py,loop:false};cv.setPointerCapture(e.pointerId);}
+});
+cv.addEventListener('pointermove',e=>{if(!drag)return;drag.px=e.clientX;drag.py=e.clientY;
+  const b=bodyAt(drag.px,drag.py);if(!b)return;const st=drag.stops,last=st[st.length-1];if(b===last)return;
+  if(drag.mode==='new'){
+    if(st.includes(b)){if(b===st[0]&&st.length>=3)drag.loop=true;return;}
+  }else{
+    const L=drag.L,other=drag.end==='head'?L.stops[L.stops.length-1]:L.stops[0];
+    if(b===other&&L.stops.length+st.length-1>=3){drag.loop=true;return;}
+    if(L.stops.includes(b)||st.includes(b))return;
+  }
+  drag.loop=false;st.push(b);tone(440+st.length*40,.06,'sine',.03);
+});
+function endDrag(){if(!drag)return;const d=drag;drag=null;
+  if(d.mode==='new'){if(d.stops.length<2)return;
+    if(freeLines()<=0){setHint('Свободных линий нет. Удали линию (×) или возьми новую в конце недели.');return;}
+    createLine(d.stops,d.loop);}
+  else{const L=d.L,add=d.stops.slice(1);if(!add.length&&!d.loop)return;
+    if(d.end==='tail')L.stops.push(...add);else{L.stops.unshift(...add.reverse());for(const s of ships)if(s.line===L)s.i+=add.length;}
+    if(d.loop)L.loop=true;recompute();updateHud(true);}
+}
+cv.addEventListener('pointerup',endDrag);cv.addEventListener('pointercancel',()=>drag=null);
+
+// ---------- HUD ----------
+const $=id=>document.getElementById(id);
+let hudSig='';
+function updateHud(force){
+  $('score').textContent=score;$('week').textContent=week;$('wk').firstChild.style.width=(weekT/WEEK*100)+'%';
+  const sig=lines.map(l=>l.color+ships.filter(s=>s.line===l).length).join()+'|'+freeLines()+freeShips()+res.cap;
+  if(!force&&sig===hudSig)return;hudSig=sig;
+  let h=lines.map((L,i)=>`<div class="chip"><span class="dot" style="background:${L.color}"></span>🚀${ships.filter(s=>s.line===L).length}
+    <button data-a="add" data-i="${i}" title="Добавить корабль">+</button><button data-a="rem" data-i="${i}" title="Снять корабль">−</button><button data-a="del" data-i="${i}" title="Удалить линию">×</button></div>`).join('');
+  h+=`<div class="res">линий ${freeLines()} · кораблей ${freeShips()} · трюм ${res.cap}</div>`;
+  $('bar').innerHTML=h;
+}
+$('bar').addEventListener('click',e=>{const t=e.target.closest('button');if(!t||gameOver)return;const L=lines[+t.dataset.i];if(!L)return;
+  if(t.dataset.a==='add')addShip(L);else if(t.dataset.a==='rem')removeShip(L);else deleteLine(L);});
+$('bPause').onclick=()=>{if(gameOver||modalOpen)return;paused=!paused;$('bPause').textContent=paused?'▶':'❚❚';};
+$('bSpeed').onclick=()=>{speed=speed===1?2:1;$('bSpeed').textContent=speed+'×';};
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();$('bPause').onclick();}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&!paused&&!gameOver&&!modalOpen)$('bPause').onclick();});
+function setHint(t){const el=$('hint');el.style.opacity=0;setTimeout(()=>{el.textContent=t;el.style.opacity=1;},250);hintT=12;}
+function hideModal(){$('modal').style.display='none';modalOpen=false;}
+function showModal(html){$('card').innerHTML=html;$('modal').style.display='flex';modalOpen=true;}
+
+const UPG={
+  line:{t:'Новая линия',d:'+1 маршрут',ok:()=>res.lines<6,go:()=>res.lines++},
+  ship:{t:'Корабль',d:'+1 корабль в запас',ok:()=>true,go:()=>res.ships++},
+  cap:{t:'Грузовой отсек',d:'все корабли везут на 2 груза больше',ok:()=>res.cap<12,go:()=>res.cap+=2},
+  lag:{t:'Станция Лагранжа',d:'хаб в точке L4/L5 планеты: пересадка и склад на 18',ok:()=>true,go:()=>{placing=true;setHint('Нажми на ромб ◇ — точку Лагранжа на 60° впереди или позади планеты.');}},
+};
+function weekEnd(){
+  week++;res.ships++;unlock();
+  const keys=Object.keys(UPG).filter(k=>UPG[k].ok()).sort(()=>Math.random()-.5).slice(0,2);
+  showModal(`<h2>Неделя ${week}</h2><p>Получен корабль${week===2?', открыта планета ◆':week===4?', открыта планета ★':', новый аванпост'}. Выбери одно:</p>
+    <div class="opts">${keys.map(k=>`<button class="opt" data-k="${k}"><b>${UPG[k].t}</b><span>${UPG[k].d}</span></button>`).join('')}</div>`);
+  $('card').querySelectorAll('.opt').forEach(b=>b.onclick=()=>{UPG[b.dataset.k].go();hideModal();updateHud(true);});
+  tone(262,.4,'triangle',.05);
+}
+function lose(b){gameOver=true;b.pulse=1;let best=0;try{best=+localStorage.getItem('orbita_best')||0;if(score>best)localStorage.setItem('orbita_best',score);}catch(_){}
+  showModal(`<h2>Склад переполнен</h2><p>Планета не дождалась кораблей.<br>Доставлено <b style="color:#e9ecf2">${score}</b> · неделя ${week}${best?` · рекорд ${Math.max(best,score)}`:''}</p>
+    <div class="opts"><button class="opt" id="again" style="text-align:center;width:auto"><b>Ещё раз</b></button></div>`);
+  $('again').onclick=reset;tone(110,.8,'sawtooth',.06);}
+
+// ---------- звук ----------
+function tone(f,dur,type,vol){if(!audio)return;const o=audio.createOscillator(),g=audio.createGain();o.type=type;o.frequency.value=f;
+  g.gain.setValueAtTime(vol,audio.currentTime);g.gain.exponentialRampToValueAtTime(.0001,audio.currentTime+dur);o.connect(g).connect(audio.destination);o.start();o.stop(audio.currentTime+dur);}
+
+// ---------- цикл ----------
+function update(dt){
+  time+=dt;weekT+=dt;
+  for(const b of bodies)place(b);
+  spawnT-=dt;if(spawnT<=0){spawn();spawnT=Math.max(.7,3.2*Math.pow(.9,week-1))*(.7+Math.random()*.6);}
+  for(const s of ships)updateShip(s,dt);
+  for(const b of bodies){const cap=capOf(b);if(b.queue.length>cap)b.over+=dt/OVER_TIME;else b.over=Math.max(0,b.over-dt/30);b.pulse=Math.max(0,b.pulse-dt*2);
+    if(b.over>=1&&!gameOver){lose(b);return;}}
+  for(const f of floats)f.t+=dt;floats=floats.filter(f=>f.t<1);
+  for(const f of flares)f.t+=dt;flares=flares.filter(f=>f.t<.8);
+  if(weekT>=WEEK){weekT=0;weekEnd();}
+}
+function drawShape(sh,x,y,r){ctx.beginPath();
+  if(sh==='circle')ctx.arc(x,y,r,0,TAU);
+  else if(sh==='triangle'){for(let k=0;k<3;k++){const a=-Math.PI/2+k*TAU/3;ctx.lineTo(x+Math.cos(a)*r*1.2,y+Math.sin(a)*r*1.2+r*.15);}ctx.closePath();}
+  else if(sh==='square')ctx.rect(x-r*.85,y-r*.85,r*1.7,r*1.7);
+  else if(sh==='diamond'){ctx.moveTo(x,y-r*1.15);ctx.lineTo(x+r,y);ctx.lineTo(x,y+r*1.15);ctx.lineTo(x-r,y);ctx.closePath();}
+  else if(sh==='star'){for(let k=0;k<10;k++){const a=-Math.PI/2+k*TAU/10,rr=k%2?r*.5:r*1.2;ctx.lineTo(x+Math.cos(a)*rr,y+Math.sin(a)*rr);}ctx.closePath();}
+}
+function render(){
+  ctx.setTransform(DPR,0,0,DPR,0,0);ctx.fillStyle='#0b0d14';ctx.fillRect(0,0,W,H);
+  for(const s of stars){ctx.fillStyle=`rgba(200,210,235,${s.a})`;ctx.fillRect(s.x*W,s.y*H,s.r,s.r);}
+  const cx=sx(0),cy=sy(0);
+  // орбиты
+  ctx.lineWidth=1;ctx.strokeStyle='rgba(124,132,150,.16)';
+  for(const b of bodies)if(b.kind!=='hub'){ctx.beginPath();ctx.arc(cx,cy,b.R*S,0,TAU);ctx.stroke();}
+  // солнце и корона
+  let g=ctx.createRadialGradient(cx,cy,0,cx,cy,CORONA*S*1.3);g.addColorStop(0,'rgba(255,190,90,.35)');g.addColorStop(1,'rgba(255,150,60,0)');
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(cx,cy,CORONA*S*1.3,0,TAU);ctx.fill();
+  ctx.setLineDash([3,5]);ctx.strokeStyle='rgba(255,180,90,.3)';ctx.beginPath();ctx.arc(cx,cy,CORONA*S,0,TAU);ctx.stroke();ctx.setLineDash([]);
+  ctx.fillStyle='#ffd27a';ctx.beginPath();ctx.arc(cx,cy,Math.max(10,SUN_R*S),0,TAU);ctx.fill();
+  // линии (общие сегменты разводим параллельно)
+  const lw=5,segs=new Map();
+  const pairs=L=>{const p=[];for(let k=0;k<L.stops.length-1;k++)p.push([L.stops[k],L.stops[k+1]]);if(L.loop)p.push([L.stops[L.stops.length-1],L.stops[0]]);return p;};
+  for(const L of lines)for(const [a,b] of pairs(L)){const key=Math.min(a.id,b.id)+'-'+Math.max(a.id,b.id);if(!segs.has(key))segs.set(key,[]);segs.get(key).push(L);}
+  ctx.lineCap='round';ctx.lineJoin='round';
+  for(const L of lines){ctx.strokeStyle=L.color;ctx.lineWidth=lw;
+    for(const [a,b] of pairs(L)){const key=Math.min(a.id,b.id)+'-'+Math.max(a.id,b.id),grp=segs.get(key),k=grp.indexOf(L);
+      const dx=b.sx-a.sx,dy=b.sy-a.sy,d=Math.hypot(dx,dy)||1,o=(k-(grp.length-1)/2)*lw*1.2,ox=-dy/d*o,oy=dx/d*o;
+      ctx.setLineDash(segBlocked(a,b)?[2,9]:[]);ctx.globalAlpha=segBlocked(a,b)?.75:1;
+      ctx.beginPath();ctx.moveTo(a.sx+ox,a.sy+oy);ctx.lineTo(b.sx+ox,b.sy+oy);ctx.stroke();}
+    ctx.setLineDash([]);ctx.globalAlpha=1;}
+  // ручки на концах линий
+  for(const h of handles()){ctx.strokeStyle=h.L.color;ctx.lineWidth=lw;ctx.beginPath();ctx.moveTo(h.body.sx+h.nx*h.body.r,h.body.sy+h.ny*h.body.r);ctx.lineTo(h.x,h.y);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(h.x-h.ny*8,h.y+h.nx*8);ctx.lineTo(h.x+h.ny*8,h.y-h.nx*8);ctx.stroke();}
+  // превью рисования
+  if(drag){const col=drag.mode==='extend'?drag.L.color:(LINE_COLORS.find(c=>!lines.some(l=>l.color===c))||'#888');
+    ctx.strokeStyle=col;ctx.globalAlpha=.7;ctx.lineWidth=lw;ctx.beginPath();ctx.moveTo(drag.stops[0].sx,drag.stops[0].sy);
+    for(const b of drag.stops)ctx.lineTo(b.sx,b.sy);if(drag.loop)ctx.lineTo((drag.mode==='new'?drag.stops[0]:(drag.end==='head'?drag.L.stops.at(-1):drag.L.stops[0])).sx,(drag.mode==='new'?drag.stops[0]:(drag.end==='head'?drag.L.stops.at(-1):drag.L.stops[0])).sy);else ctx.lineTo(drag.px,drag.py);ctx.stroke();ctx.globalAlpha=1;}
+  // следы пращи
+  for(const s of ships)if(s.trail.length>2){ctx.strokeStyle=s.line.color;ctx.lineWidth=3;ctx.globalAlpha=.35;ctx.beginPath();
+    for(let k=0;k<s.trail.length;k+=2)ctx.lineTo(sx(s.trail[k]),sy(s.trail[k+1]));ctx.stroke();ctx.globalAlpha=1;}
+  // тела
+  for(const b of bodies){const x=b.sx,y=b.sy;
+    if(b.kind==='giant'){ctx.fillStyle='#3a3248';ctx.beginPath();ctx.arc(x,y,b.r,0,TAU);ctx.fill();
+      ctx.strokeStyle='#d8b98a';ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,b.r,0,TAU);ctx.stroke();
+      ctx.lineWidth=1.5;ctx.beginPath();ctx.ellipse(x,y,b.r*1.7,b.r*.45,-.35,0,TAU);ctx.stroke();
+      ctx.strokeStyle='rgba(216,185,138,.35)';ctx.beginPath();ctx.moveTo(x-b.r*.8,y-6);ctx.lineTo(x+b.r*.8,y-6);ctx.moveTo(x-b.r*.9,y+5);ctx.lineTo(x+b.r*.9,y+5);ctx.stroke();}
+    else if(b.kind==='hub'){ctx.strokeStyle='#e9ecf2';ctx.lineWidth=3;ctx.beginPath();ctx.arc(x,y,b.r,0,TAU);ctx.stroke();
+      ctx.lineWidth=2;ctx.beginPath();for(let k=0;k<4;k++){const a=k*Math.PI/2+time*.5;ctx.moveTo(x+Math.cos(a)*(b.r+2),y+Math.sin(a)*(b.r+2));ctx.lineTo(x+Math.cos(a)*(b.r+7),y+Math.sin(a)*(b.r+7));}ctx.stroke();
+      ctx.fillStyle='#e9ecf2';ctx.beginPath();ctx.arc(x,y,2.5,0,TAU);ctx.fill();}
+    else{const age=Math.min(1,(time-b.born)/1.2);ctx.fillStyle='#0b0d14';ctx.strokeStyle='#e9ecf2';ctx.lineWidth=3.5;drawShape(b.shape,x,y,b.r*(.4+.6*age));ctx.fill();ctx.stroke();
+      if(age<1){ctx.strokeStyle=`rgba(233,236,242,${1-age})`;ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,b.r+30*age,0,TAU);ctx.stroke();}}
+    if(b.pulse>0){ctx.strokeStyle=`rgba(233,236,242,${b.pulse})`;ctx.lineWidth=2;ctx.beginPath();ctx.arc(x,y,b.r+6+(1-b.pulse)*14,0,TAU);ctx.stroke();}
+    if(b.over>0){ctx.strokeStyle='rgba(255,90,95,.25)';ctx.lineWidth=4;ctx.beginPath();ctx.arc(x,y,b.r+10,0,TAU);ctx.stroke();
+      ctx.strokeStyle='#ff5a5f';ctx.beginPath();ctx.arc(x,y,b.r+10,-Math.PI/2,-Math.PI/2+TAU*b.over);ctx.stroke();}
+    // очередь грузов
+    const cap=capOf(b),over=b.queue.length>cap;
+    b.queue.forEach((c,k)=>{const qx=x+b.r+12+(k%4)*10,qy=y-b.r+2+Math.floor(k/4)*10;ctx.fillStyle=over?'#ff8a8d':'#c9cfdc';drawShape(c.shape,qx,qy,3.6);ctx.fill();});
+  }
+  // точки Лагранжа при размещении
+  if(placing){const p=(Math.sin(time*6)+1)/2;for(const q of lagrangePoints()){ctx.strokeStyle=`rgba(233,236,242,${.5+.5*p})`;ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(q.x,q.y-10);ctx.lineTo(q.x+8,q.y);ctx.lineTo(q.x,q.y+10);ctx.lineTo(q.x-8,q.y);ctx.closePath();ctx.stroke();}}
+  // корабли
+  for(const s of ships){const x=sx(s.x),y=sy(s.y),n=s.cargo.length,len=Math.max(16,8+Math.min(n,6)*6);
+    ctx.save();ctx.translate(x,y);ctx.rotate(s.ang);ctx.fillStyle=s.line.color;
+    if(s.boost>0){ctx.shadowColor=s.line.color;ctx.shadowBlur=14;}
+    ctx.beginPath();ctx.roundRect?ctx.roundRect(-len/2,-5,len,10,4):ctx.rect(-len/2,-5,len,10);ctx.fill();ctx.shadowBlur=0;
+    ctx.fillStyle='#0b0d14';for(let k=0;k<Math.min(n,6);k++){drawShape(s.cargo[k].shape,-len/2+7+k*6,0,2.4);ctx.fill();}
+    if(n>6){ctx.fillRect(len/2-4,-1,2,2);}
+    ctx.restore();}
+  // вспышки пращи
+  for(const f of flares){ctx.strokeStyle=f.c;ctx.globalAlpha=1-f.t/.8;ctx.lineWidth=3;ctx.beginPath();ctx.arc(f.b.sx,f.b.sy,f.b.r+8+f.t*50,0,TAU);ctx.stroke();ctx.globalAlpha=1;}
+  // +1
+  ctx.font='600 14px -apple-system,system-ui,sans-serif';ctx.textAlign='center';
+  for(const f of floats){ctx.fillStyle=`rgba(233,236,242,${1-f.t})`;ctx.fillText('+1',sx(f.x),sy(f.y)-20-f.t*24);}
+  if(paused&&!modalOpen){ctx.fillStyle='rgba(233,236,242,.6)';ctx.font='600 16px -apple-system,system-ui,sans-serif';ctx.fillText('пауза',W/2,H-70);}
+}
+let last=performance.now(),hudT=0;
+function frame(now){const raw=Math.min(.05,(now-last)/1000);last=now;
+  if(!paused&&!gameOver&&!modalOpen){const dt=raw*speed;update(dt);}
+  else for(const b of bodies)place(b);
+  hintT-=raw;if(hintT<=0&&hintT>-1)$('hint').style.opacity=0;
+  hudT-=raw;if(hudT<=0){hudT=.2;updateHud();}
+  render();requestAnimationFrame(frame);}
+// отладка/тесты: window.G
+window.G={get s(){return {score,week,time,lines,ships,bodies,res}},step:(n=1,dt=1/30)=>{for(let k=0;k<n&&!gameOver&&!modalOpen;k++)update(dt);},createLine:(ids,loop)=>createLine(ids.map(i=>bodies.find(b=>b.id===i)),!!loop),weekEnd:()=>weekEnd()};
+reset();requestAnimationFrame(frame);
+</script>
+</body>
+</html>
